@@ -181,6 +181,9 @@ Or, for more sophisticated deployment, with your gatekeepers and potentially cod
 
 https://github.com/cloudflare/cloudflare-os-starter
 
+For automated Workshop administration in Access deployments, see
+[Access service administrators](docs/access-service-administrators.md).
+
 ### Run locally
 
 To quickly run Cloudflare OS locally, [install pnpm](https://pnpm.io/), then do:

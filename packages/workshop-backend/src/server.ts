@@ -1,6 +1,5 @@
 import { RpcStub, RpcTarget, newHttpBatchRpcResponse, newWebSocketRpcSession, RpcSessionOptions } from "capnweb";
 import { validateRpc } from "capnweb-validate";
-import type { JWTPayload } from "jose";
 import { PublicApi, AuthenticatedApi, Overseer, GadgetMetadataWithTimestamps, AiChatAuthorInfo, AiModelConfig, AiGatewayInfo, AiModelProvider, ConnectedAccountsSubscriber, ConnectedAccountsFilter, GatekeeperVendorFilter, ObserverConfigCallback, BlueprintLibrarySummary, BlueprintPublicInfo, BlueprintUserSummary, BlueprintBindingAssignment, AgentSpawnerConfig, WorkpieceId, BLUEPRINT_SCREENSHOT_PATH_PREFIX, BLUEPRINT_SCREENSHOT_R2_PREFIX, blueprintScreenshotUrl, ServerConfig, CloudflareUsageInfo, CloudflareAccountOption, LoginAttempt, GatekeeperAppInfo, AdminApi, GatekeeperVendorInfo, OutputFormatOffer, ListOutputsResult, createOpenGadgetError, getOpenGadgetErrorCode, OPEN_GADGET_ERROR_CODES, AUTH_ERROR_CODES, createAuthError } from '@gadgets/workshop-shared/api';
 import type { UiFeatureFlags } from "@gadgets/workshop-shared/feature-flags";
 import { getServerConfig } from "./deployment-config.js";
@@ -24,7 +23,7 @@ import { ExternalMessageGateway } from "./external-message-gateway";
 import { RpcStub as NativeRpcStub } from "cloudflare:workers";
 import { recordAnalytics } from "./analytics";
 import { handleClientErrorRequest } from "./client-errors.js";
-import { verifyCfAccessJwt } from "./access.js";
+import { verifyCfAccessJwt, resolveCfAccessPrincipal, isWorkshopAdmin, type CfAccessPrincipal } from "./access.js";
 import { resolveUiFeatureFlags } from "./feature-flags";
 import { serveSiteLogo, SITE_LOGO_PATH } from "./site-logo.js";
 import { createWorkshopLogger } from "./observability";
@@ -66,6 +65,7 @@ type Env = Cloudflare.Env & {
   // Set these if using Cloudflare Access for authentication, otherwise username/password is used.
   CF_ACCESS_AUD?: string,  // audience
   CF_ACCESS_ISS?: string,  // team URL, i.e. https://<team>.cloudflareaccess.com
+  CF_ACCESS_SERVICE_ADMINS?: string[] | string;
   DEV?: boolean;
   FLAGS?: Flagship;
 }
@@ -76,7 +76,8 @@ type Env = Cloudflare.Env & {
 class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   constructor(private ctx: ExecutionContext, private env: Env,
       userId: DurableObjectId,
-      private abortSession: (reason: Error) => void) {
+      private abortSession: (reason: Error) => void,
+      private accessPrincipal?: CfAccessPrincipal) {
     super();
 
     this.#userId = userId;
@@ -98,22 +99,7 @@ class AuthenticatedApiImpl extends RpcTarget implements AuthenticatedApi {
   }
 
   #isAdmin(): boolean {
-    let name = this.#userId.name;
-    let admins = this.env.ADMINS;
-
-    if (!name || !admins) return false;
-
-    if (typeof admins === "string") {
-      // Admins should be a JSON binding of array type, but `.env` doesn't actually let you
-      // specify JSON bindings, so we also support a string that parses as JSON array.
-      admins = JSON.parse(admins);
-    }
-
-    if (!Array.isArray(admins)) {
-      throw new TypeError("ADMINS must be configured as an array of usernames.");
-    }
-
-    return admins.includes(name);
+    return isWorkshopAdmin(this.#userId.name, this.env, this.accessPrincipal);
   }
 
   whoami(): Promise<AiChatAuthorInfo> {
@@ -637,7 +623,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
 
   constructor(private ctx: ExecutionContext, private env: Env,
       private abortSession: (reason: Error) => void,
-      private accessPayload?: JWTPayload) {
+      private accessPrincipal?: CfAccessPrincipal) {
     super();
     this.users = this.ctx.exports.UserDurableObject;
   }
@@ -691,15 +677,18 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
   }
 
   async authenticateFromCfAccess(): Promise<AuthenticatedApi> {
-    if (!this.accessPayload) {
+    if (!this.accessPrincipal) {
       throw createAuthError(AUTH_ERROR_CODES.notAuthenticatedWithAccess);
     }
 
-    let email = this.accessPayload.email as string;
-    let userId = this.users.idFromName(email);
-    let signupsEnabled = (await readAdminConfig(this.env)).signupsEnabled;
+    let principal = this.accessPrincipal;
+    let accountName = principal.userId;
+    let userId = this.users.idFromName(accountName);
+    // An allowlisted service is explicitly provisioned by the deployment owner, independent
+    // of whether public account registration is open. It never aliases a human account.
+    let signupsEnabled = principal.type === "service" || (await readAdminConfig(this.env)).signupsEnabled;
     let accountCreated =
-        await this.users.get(userId).authenticateFromCfAccess(email, signupsEnabled);
+        await this.users.get(userId).authenticateFromCfAccess(accountName, signupsEnabled);
     if (accountCreated) {
       recordAnalytics(this.ctx, this.env, {
         event_name: "account_created",
@@ -712,7 +701,7 @@ class PublicApiImpl extends RpcTarget implements PublicApi {
       user_id: userId.toString(),
       source: "cf_access",
     });
-    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession);
+    return new AuthenticatedApiImpl(this.ctx, this.env, userId, this.abortSession, principal);
   }
 
   async login(username: string, passwordHash: Uint8Array): Promise<string | null> {
@@ -810,6 +799,32 @@ export default {
       return handleClientErrorRequest(req, env, ctx);
     }
 
+    let accessPrincipal: CfAccessPrincipal | undefined;
+    if (url.pathname === "/api" || url.pathname === "/api/admin-auth") {
+      if (env.CF_ACCESS_AUD) {
+        if (req.headers.get("Origin") !== url.origin) {
+          return new Response("Cross-origin API access not allowed.", { status: 403 });
+        }
+        const payload = await verifyCfAccessJwt(req, env);
+        const principal = payload && resolveCfAccessPrincipal(payload, env);
+        if (!principal) return new Response("Invalid CF access identity.", { status: 403 });
+        accessPrincipal = principal;
+      }
+      if (url.pathname === "/api/admin-auth") {
+        if (req.method !== "GET") return new Response("Method not allowed.", {
+          status: 405, headers: { Allow: "GET" },
+        });
+        if (!accessPrincipal || !isWorkshopAdmin(accessPrincipal.userId, env, accessPrincipal)) {
+          return new Response("Administrator authentication required.", { status: 403 });
+        }
+        return Response.json({
+          schema: "workshop-admin-auth.v1", authenticated: true, admin: true,
+          principal_type: accessPrincipal.type,
+          ...(accessPrincipal.type === "service" ? { client_id: accessPrincipal.clientId } : {}),
+        }, { headers: { "Cache-Control": "no-store" } });
+      }
+    }
+
     if (url.pathname === "/api") {
       // Make sure the bundled format blueprints are installed. The AdminSettings DO doesn't wake
       // merely because someone deployed, so the install needs a trigger; hanging it off API
@@ -834,23 +849,6 @@ export default {
             }));
       }
 
-      let accessPayload: JWTPayload | undefined;
-
-      if (env.CF_ACCESS_AUD) {
-        if (req.headers.get("Origin") !== url.origin) {
-          return new Response("Cross-origin API access not allowed.", { status: 403 });
-        }
-
-        const payload = await verifyCfAccessJwt(req, env);
-        if (!payload) return new Response("Invalid CF access JWT.", { status: 403 });
-
-        if (!payload.email) {
-          return new Response("Access JWT didn't specify email address.", { status: 403 });
-        }
-
-        accessPayload = payload;
-      }
-
       // HACK: Implement `abortSession` callback by closing the websocket.
       // TODO: When ctx.abort() becomes non-experimental, consider using that instead.
       let abortController = new AbortController();
@@ -861,7 +859,7 @@ export default {
       };
 
       return await newWorkersRpcResponse(req,
-          new PublicApiImpl(ctx, env, abortSession, accessPayload),
+          new PublicApiImpl(ctx, env, abortSession, accessPrincipal),
           { abortSignal: abortController.signal });
     }
 

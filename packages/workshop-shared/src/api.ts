@@ -67,10 +67,9 @@ export interface PublicApi extends RpcTarget {
   authenticate(token: string): Promise<AuthenticatedApi>;
 
   /**
-   * Like authenticate() but the server is expected to be sitting behind Cloudflare Access, and the
-   * client is expected to have already authenticated with Access (before they could load the
-   * application in their browser at all). The credentials from the Cloudflare Access session will
-   * be used to authenticate the user.
+   * Authenticates the caller from the verified Cloudflare Access assertion on this connection.
+   * Supports human sessions and explicitly configured service principals; see
+   * docs/access-service-administrators.md for the service authorization contract.
    */
   authenticateFromCfAccess(): Promise<AuthenticatedApi>;
 

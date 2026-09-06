@@ -16,7 +16,11 @@ export default defineConfig({
       miniflare: {
         compatibilityDate: '2026-02-02',
         compatibilityFlags: ['experimental', 'nodejs_compat'],
+        kvNamespaces: ['BLUEPRINTS'],
+        r2Buckets: ['BLUEPRINT_CONTENT'],
         durableObjects: {
+          TEST_ADMIN: { className: 'AdminSettings', useSQLite: true },
+          TEST_USER: { className: 'UserDurableObject', useSQLite: true },
           TEST_OVERSEER: { className: 'OverseerDurableObject', useSQLite: true },
         },
       },

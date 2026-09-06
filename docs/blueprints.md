@@ -101,6 +101,7 @@ The trailing content bytes are the same gzip-compressed Yjs snapshot that is alr
 ## Admin Features and Featured Blueprints
 
 Deployments can optionally configure a set of admin usernames through the backend worker's `ADMINS` binding as an array of usernames.
+For service authentication, see [Access service administrators](access-service-administrators.md).
 
 Admins get access to two extra RPCs:
 
@@ -126,7 +127,7 @@ A deployment can also ship blueprints as data. `packages/workshop-backend/format
 - They have **no owning User DO**. `AdminSettings` writes them straight into the featured mirror, because there is no publishing user whose `featured` bit could be authoritative.
 - Their `output` lives in the sidecar rather than the archive, so the deployment's presentation has a single source of truth.
 
-The first `/api` request a deployment serves installs any whose manifest fingerprint has changed. The fingerprint covers its title, description, author, revision, and output presentation; `revision` represents changes to the archive bytes. Each bundled blueprint is promoted only once ever -- an upgrade never undoes an admin's later removal or overrides.
+The first `/api` request a deployment serves installs any whose manifest fingerprint has changed; in Access mode, the request must first pass Access authentication. The fingerprint covers its title, description, author, revision, and output presentation; `revision` represents changes to the archive bytes. Each bundled blueprint is promoted only once ever -- an upgrade never undoes an admin's later removal or overrides.
 
 ## Creating and Managing Blueprints
 

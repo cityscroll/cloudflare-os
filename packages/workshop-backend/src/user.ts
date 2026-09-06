@@ -320,7 +320,7 @@ export class UserDurableObject extends DurableObject<Cloudflare.Env> {
 
   /**
    * Returns true when this login created the account on first use. When the account doesn't yet
-   * exist and `allowCreate` is false (deployment signups are closed), refuses rather than creating —
+   * exist and `allowCreate` is false, refuses rather than creating —
    * existing users can still sign in.
    */
   async authenticateFromCfAccess(email: string, allowCreate: boolean): Promise<boolean> {

@@ -25,6 +25,7 @@ it("authenticates a signed service and persists an admin RPC mutation with publi
   const ctx = createExecutionContext();
   const durableAdmin = exports.AdminSettings.getByName("");
   await durableAdmin.updateAdminConfig({ signupsEnabled: false, siteName: "Before service operation" });
+  // oxlint-disable-next-line unicorn/consistent-function-scoping -- Defaults capture this test's settings, issuer and private key.
   const sign = (claims: object, aud = settings.CF_ACCESS_AUD, iss = issuer, key = pair.privateKey) =>
     new SignJWT(claims).setProtectedHeader({ alg: "RS256" }).setIssuer(iss).setAudience(aud)
       .setExpirationTime("5m").sign(key);
